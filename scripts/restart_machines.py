@@ -118,10 +118,13 @@ class CompShareManager:
             mode = "无卡模式" if without_gpu else "普通模式"
             print(f"🚀 正在以{mode}启动 {len(instance_ids)} 台机器...")
             for instance_id in instance_ids:
-                self.client.ucompshare().start_comp_share_instance({
+                # 直接用 invoke() 绕过 SDK 的 Schema 校验，因为 SDK 的
+                # StartCompShareInstanceRequestSchema 里没有定义 WithoutGpu 字段
+                self.client.ucompshare().invoke("StartCompShareInstance", {
+                    "Region": self.client.config.region,
                     "Zone": self.zone,
                     "UHostId": instance_id,
-                    "WithoutGpu": without_gpu
+                    "WithoutGpu": without_gpu,
                 })
 
             print(f"✅ 开机请求已发送\n")
