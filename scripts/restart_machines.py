@@ -33,12 +33,12 @@ class CompShareManager:
 
         self.zone = "cn-wlcb-01"
 
-    def get_all_instances(self) -> List[str]:
+    def get_all_instances(self) -> Dict[str, bool]:
         """
-        获取所有机器实例
+        获取所有机器实例及其是否支持无卡启动
 
         Returns:
-            机器 ID 列表
+            Dict[str, bool]: instance_id -> 是否支持无卡启动
         """
         try:
             print("📋 正在获取所有机器列表...")
@@ -47,21 +47,24 @@ class CompShareManager:
             })
 
             instances = resp.get("UHostSet", [])
-            instance_ids = []
+            result = {}
 
             for instance in instances:
                 instance_id = instance.get("UHostId")
                 name = instance.get("Name", "未命名")
                 state = instance.get("State", "未知")
+                support_without_gpu = instance.get("SupportWithoutGpuStart", False)
 
-                print(f"  - {instance_id}: {name} (状态: {state})")
+                print(f"  - {instance_id}: {name} (状态: {state}, {'支持' if support_without_gpu else '不支持'}无卡启动)")
+
                 if instance_id:
-                    instance_ids.append(instance_id)
+                    result[instance_id] = support_without_gpu
                 else:
                     print("⚠️  跳过无 UHostId 的实例")
 
-            print(f"✅ 找到 {len(instance_ids)} 台机器\n")
-            return instance_ids
+            cardless_count = sum(1 for v in result.values() if v)
+            print(f"✅ 找到 {len(result)} 台机器（{cardless_count} 台支持无卡启动）\n")
+            return result
 
         except exc.UCloudException as e:
             print(f"❌ 获取机器列表失败: {e}")
@@ -112,7 +115,8 @@ class CompShareManager:
             return True
 
         try:
-            print(f"🚀 正在启动 {len(instance_ids)} 台机器...")
+            mode = "无卡模式" if without_gpu else "普通模式"
+            print(f"🚀 正在以{mode}启动 {len(instance_ids)} 台机器...")
             for instance_id in instance_ids:
                 self.client.ucompshare().start_comp_share_instance({
                     "Zone": self.zone,
@@ -176,52 +180,50 @@ def main():
     try:
         manager = CompShareManager()
 
-        # 1. 获取所有机器
-        instance_ids = manager.get_all_instances()
+        # 1. 获取所有机器及其无卡启动支持情况
+        instances = manager.get_all_instances()
 
-        if not instance_ids:
+        if not instances:
             print("ℹ️  没有找到任何机器，任务结束")
             return 0
 
-        without_gpu = True
+        # 2. 按是否支持无卡启动分组
+        cardless_ids = [iid for iid, supports in instances.items() if supports]
+        normal_ids = [iid for iid, supports in instances.items() if not supports]
 
-        # 无卡模式同一时间只能开机 1 台，按顺序处理
-        if without_gpu and len(instance_ids) > 1:
-            for instance_id in instance_ids:
-                if not manager.start_instances([instance_id], without_gpu=without_gpu):
-                    print("❌ 开机失败，终止任务")
-                    return 1
-
-                manager.wait_for_status([instance_id], "Running", timeout=300)
-
-                print("⏸️  等待 30 秒后关闭机器...\n")
-                time.sleep(30)
-
-                if not manager.stop_instances([instance_id]):
-                    print("❌ 关机失败，终止任务")
-                    return 1
-
-                manager.wait_for_status([instance_id], "Stopped", timeout=300)
-        else:
-            # 2. 先启动所有机器
-            if not manager.start_instances(instance_ids, without_gpu=without_gpu):
+        # 3. 处理支持无卡启动的机器（无卡模式同一时间只能开机 1 台，按顺序处理）
+        for instance_id in cardless_ids:
+            if not manager.start_instances([instance_id], without_gpu=True):
                 print("❌ 开机失败，终止任务")
                 return 1
 
-            # 3. 等待机器启动
-            manager.wait_for_status(instance_ids, "Running", timeout=300)
+            manager.wait_for_status([instance_id], "Running", timeout=300)
 
-            # 4. 等待一段时间（确保完全启动）
             print("⏸️  等待 30 秒后关闭机器...\n")
             time.sleep(30)
 
-            # 5. 关闭所有机器
-            if not manager.stop_instances(instance_ids):
+            if not manager.stop_instances([instance_id]):
                 print("❌ 关机失败，终止任务")
                 return 1
 
-            # 6. 等待机器关闭
-            manager.wait_for_status(instance_ids, "Stopped", timeout=300)
+            manager.wait_for_status([instance_id], "Stopped", timeout=300)
+
+        # 4. 处理不支持无卡启动的普通机器（批量处理）
+        if normal_ids:
+            if not manager.start_instances(normal_ids, without_gpu=False):
+                print("❌ 开机失败，终止任务")
+                return 1
+
+            manager.wait_for_status(normal_ids, "Running", timeout=300)
+
+            print("⏸️  等待 30 秒后关闭机器...\n")
+            time.sleep(30)
+
+            if not manager.stop_instances(normal_ids):
+                print("❌ 关机失败，终止任务")
+                return 1
+
+            manager.wait_for_status(normal_ids, "Stopped", timeout=300)
 
         print("=" * 60)
         print("✅ 重启任务完成！")
